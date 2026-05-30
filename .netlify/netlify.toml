@@ -1,0 +1,77 @@
+functionsDirectory = "/Users/jonghyungkim/Desktop/Cowork_Workspace/openclaw skills install stock-analysis/deploy/netlify/functions"
+functionsDirectoryOrigin = "config-v1"
+redirectsOrigin = "config"
+plugins = []
+headers = []
+
+[build]
+publish = "/Users/jonghyungkim/Desktop/Cowork_Workspace/openclaw skills install stock-analysis/deploy"
+publishOrigin = "config"
+functions = "/Users/jonghyungkim/Desktop/Cowork_Workspace/openclaw skills install stock-analysis/deploy/netlify/functions"
+
+[build.environment]
+
+[build.processing]
+
+[build.processing.css]
+
+[build.processing.html]
+
+[build.processing.images]
+
+[build.processing.js]
+
+[build.services]
+
+[functions]
+
+[functions."*"]
+node_bundler = "esbuild"
+
+[[redirects]]
+from = "/api/quote"
+to = "/.netlify/functions/quote"
+status = 200.0
+force = false
+
+[redirects.query]
+
+[redirects.conditions]
+
+[redirects.headers]
+
+[[redirects]]
+from = "/api/news"
+to = "/.netlify/functions/news"
+status = 200.0
+force = false
+
+[redirects.query]
+
+[redirects.conditions]
+
+[redirects.headers]
+
+[[redirects]]
+from = "/api/trending"
+to = "/.netlify/functions/trending"
+status = 200.0
+force = false
+
+[redirects.query]
+
+[redirects.conditions]
+
+[redirects.headers]
+
+[[redirects]]
+from = "/api/movers"
+to = "/.netlify/functions/movers"
+status = 200.0
+force = false
+
+[redirects.query]
+
+[redirects.conditions]
+
+[redirects.headers]

@@ -5,6 +5,18 @@
 [functions]
   node_bundler = "esbuild"
 
+[functions."quote"]
+  runtime = "python3.9"
+
+[functions."news"]
+  runtime = "python3.9"
+
+[functions."trending"]
+  runtime = "python3.9"
+
+[functions."movers"]
+  runtime = "python3.9"
+
 [[redirects]]
   from = "/api/quote"
   to = "/.netlify/functions/quote"
