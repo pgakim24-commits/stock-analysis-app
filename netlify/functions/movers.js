@@ -2,24 +2,17 @@ const https = require("https");
 
 function get(url) {
   return new Promise((resolve, reject) => {
-    const req = https.get(
-      url,
-      {
-        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-        timeout: 10000,
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            reject(new Error("JSON parse failed"));
-          }
-        });
-      },
-    );
+    const req = https.get(url, { timeout: 12000 }, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          reject(new Error("JSON parse error"));
+        }
+      });
+    });
     req.on("error", reject);
     req.on("timeout", () => {
       req.destroy();
@@ -39,6 +32,18 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Origin": "*",
     "Content-Type": "application/json",
   };
+  const KEY = process.env.FINNHUB_API_KEY;
+  if (!KEY)
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        gainers: [],
+        losers: [],
+        error: "FINNHUB_API_KEY not set",
+      }),
+    };
+
   try {
     const symbols = [
       "NVDA",
@@ -54,24 +59,18 @@ exports.handler = async (event) => {
     ];
     const results = await Promise.allSettled(
       symbols.map((sym) =>
-        get(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=5d`,
-        ).then((d) => {
-          const meta = d?.chart?.result?.[0]?.meta || {};
-          const price = safe(meta.regularMarketPrice);
-          const prev = safe(meta.chartPreviousClose);
-          const change = price && prev ? ((price - prev) / prev) * 100 : null;
-          return {
+        get(`https://finnhub.io/api/v1/quote?symbol=${sym}&token=${KEY}`).then(
+          (q) => ({
             ticker: sym,
-            name: meta.shortName || sym,
-            price: safe(price),
-            change: safe(change),
-          };
-        }),
+            name: sym,
+            price: safe(q.c),
+            change: safe(q.c && q.pc ? ((q.c - q.pc) / q.pc) * 100 : null),
+          }),
+        ),
       ),
     );
     const all = results
-      .filter((r) => r.status === "fulfilled")
+      .filter((r) => r.status === "fulfilled" && r.value.price)
       .map((r) => r.value);
     const gainers = all
       .filter((r) => (r.change || 0) > 0)

@@ -1,62 +1,24 @@
 const https = require("https");
 
-// Generic HTTP GET — returns parsed JSON and response headers
-function get(url, extraHeaders = {}) {
+function get(url) {
   return new Promise((resolve, reject) => {
-    const req = https.get(
-      url,
-      {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Accept: "application/json, text/plain, */*",
-          "Accept-Language": "en-US,en;q=0.9",
-          ...extraHeaders,
-        },
-        timeout: 12000,
-      },
-      (res) => {
-        let data = "";
-        const cookies = res.headers["set-cookie"] || [];
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          try {
-            resolve({
-              json: JSON.parse(data),
-              cookies,
-              status: res.statusCode,
-            });
-          } catch {
-            resolve({ text: data, cookies, status: res.statusCode });
-          }
-        });
-      },
-    );
+    const req = https.get(url, { timeout: 12000 }, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          reject(new Error("JSON parse error"));
+        }
+      });
+    });
     req.on("error", reject);
     req.on("timeout", () => {
       req.destroy();
       reject(new Error("timeout"));
     });
   });
-}
-
-// Fetch Yahoo crumb + cookies
-async function getYahooCrumb() {
-  try {
-    // Step 1: get cookies from Yahoo Finance homepage
-    const r1 = await get("https://finance.yahoo.com/");
-    const cookieStr = (r1.cookies || []).map((c) => c.split(";")[0]).join("; ");
-
-    // Step 2: get crumb using cookies
-    const r2 = await get("https://query2.finance.yahoo.com/v1/test/getcrumb", {
-      Cookie: cookieStr,
-    });
-    const crumb = r2.text?.trim() || r2.json;
-    if (typeof crumb === "string" && crumb.length > 0 && crumb.length < 30) {
-      return { crumb, cookieStr };
-    }
-  } catch {}
-  return { crumb: null, cookieStr: "" };
 }
 
 function safe(v) {
@@ -99,91 +61,122 @@ exports.handler = async (event) => {
     "Content-Type": "application/json",
   };
   const ticker = (event.queryStringParameters?.ticker || "").toUpperCase();
+  const KEY = process.env.FINNHUB_API_KEY;
+
   if (!ticker)
     return {
       statusCode: 400,
       headers,
       body: JSON.stringify({ error: "ticker required" }),
     };
+  if (!KEY)
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({ error: "FINNHUB_API_KEY not set" }),
+    };
 
   try {
-    // Get crumb for authenticated endpoints
-    const { crumb, cookieStr } = await getYahooCrumb();
-    const authHeaders = cookieStr ? { Cookie: cookieStr } : {};
-
-    // Fetch chart + summary in parallel
-    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1y`;
-    const summaryUrl = crumb
-      ? `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=price,financialData,defaultKeyStatistics,summaryDetail,recommendationTrend,summaryProfile&crumb=${encodeURIComponent(crumb)}`
-      : `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=price,financialData,defaultKeyStatistics,summaryDetail,recommendationTrend,summaryProfile`;
-
-    const [chartRes, summaryRes] = await Promise.all([
-      get(chartUrl),
-      get(summaryUrl, authHeaders),
+    // Finnhub: quote + profile + metrics + recommendation
+    const [quote, profile, metrics, rec] = await Promise.all([
+      get(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${KEY}`),
+      get(
+        `https://finnhub.io/api/v1/stock/profile2?symbol=${ticker}&token=${KEY}`,
+      ),
+      get(
+        `https://finnhub.io/api/v1/stock/metric?symbol=${ticker}&metric=all&token=${KEY}`,
+      ),
+      get(
+        `https://finnhub.io/api/v1/stock/recommendation?symbol=${ticker}&token=${KEY}`,
+      ),
     ]);
 
-    const c = chartRes.json?.chart?.result?.[0];
-    if (!c)
+    if (!quote.c)
       return {
         statusCode: 404,
         headers,
-        body: JSON.stringify({ error: "no data for " + ticker }),
+        body: JSON.stringify({ error: "티커를 찾을 수 없습니다: " + ticker }),
       };
 
-    const meta = c.meta;
-    const closes = (c.indicators?.quote?.[0]?.close || []).filter(
-      (v) => v != null,
+    // Candle data for chart + MA + RSI (1년치, 일봉)
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - 365 * 24 * 3600;
+    const candle = await get(
+      `https://finnhub.io/api/v1/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}&token=${KEY}`,
     );
-    const timestamps = c.timestamp || [];
+
+    const closes = candle.s === "ok" ? candle.c : [];
+    const timestamps = candle.s === "ok" ? candle.t : [];
     const rsi = calcRSI(closes);
 
-    const sum = summaryRes.json?.quoteSummary?.result?.[0] || {};
-    const fin = sum.financialData || {};
-    const stat = sum.defaultKeyStatistics || {};
-    const detail = sum.summaryDetail || {};
-    const priceM = sum.price || {};
-    const sp = sum.summaryProfile || {};
+    const m = metrics.metric || {};
+    const r = rec?.[0] || {};
+
+    // analyst consensus
+    const total =
+      (r.strongBuy || 0) +
+      (r.buy || 0) +
+      (r.hold || 0) +
+      (r.sell || 0) +
+      (r.strongSell || 0);
+    const recMean =
+      total > 0
+        ? ((r.strongBuy || 0) * 1 +
+            (r.buy || 0) * 2 +
+            (r.hold || 0) * 3 +
+            (r.sell || 0) * 4 +
+            (r.strongSell || 0) * 5) /
+          total
+        : null;
 
     const result = {
       ticker,
-      name:
-        priceM.longName ||
-        priceM.shortName ||
-        meta.shortName ||
-        meta.symbol ||
-        ticker,
-      exchange: meta.exchangeName || priceM.exchangeName || "",
-      sector: sp.sector || "",
-      industry: sp.industry || "",
-      currency: meta.currency || "USD",
-      price: safe(meta.regularMarketPrice),
-      prev: safe(meta.chartPreviousClose),
-      high52: safe(meta.fiftyTwoWeekHigh),
-      low52: safe(meta.fiftyTwoWeekLow),
-      marketCap: safe(priceM.marketCap?.raw || detail.marketCap?.raw),
-      pe: safe(stat.trailingPE?.raw || detail.trailingPE?.raw),
-      forwardPe: safe(stat.forwardPE?.raw),
-      pb: safe(stat.priceToBook?.raw),
-      ps: safe(stat.priceToSalesTrailingTwelveMonths?.raw),
-      evEbitda: safe(stat.enterpriseToEbitda?.raw),
-      revenueGrowth: safe(fin.revenueGrowth?.raw),
-      operatingMargin: safe(fin.operatingMargins?.raw),
-      profitMargin: safe(fin.profitMargins?.raw),
-      roe: safe(fin.returnOnEquity?.raw),
+      name: profile.name || ticker,
+      exchange: profile.exchange || "",
+      sector: profile.finnhubIndustry || "",
+      industry: profile.finnhubIndustry || "",
+      currency: profile.currency || "USD",
+      price: safe(quote.c),
+      prev: safe(quote.pc),
+      high52: safe(m["52WeekHigh"]),
+      low52: safe(m["52WeekLow"]),
+      marketCap: safe(
+        profile.marketCapitalization
+          ? profile.marketCapitalization * 1e6
+          : null,
+      ),
+      pe: safe(m.peBasicExclExtraTTM || m.peTTM),
+      forwardPe: safe(m.peNormalizedAnnual),
+      pb: safe(m.pbAnnual || m.pbQuarterly),
+      ps: safe(m.psAnnual || m.psTTM),
+      evEbitda: safe(m.currentEv_freeCashFlowTTM),
+      revenueGrowth: safe(
+        m.revenueGrowthTTMYoy ? m.revenueGrowthTTMYoy / 100 : null,
+      ),
+      operatingMargin: safe(
+        m.operatingMarginTTM ? m.operatingMarginTTM / 100 : null,
+      ),
+      profitMargin: safe(
+        m.netProfitMarginTTM ? m.netProfitMarginTTM / 100 : null,
+      ),
+      roe: safe(m.roeTTM ? m.roeTTM / 100 : null),
       rsi: safe(rsi),
       ma20: safe(avg(closes, 20)),
       ma60: safe(avg(closes, 60)),
       ma120: safe(avg(closes, 120)),
-      recMean: safe(fin.recommendationMean?.raw),
-      recKey: fin.recommendationKey || "",
-      targetMeanPrice: safe(fin.targetMeanPrice?.raw),
-      analystCount: safe(fin.numberOfAnalystOpinions?.raw),
-      shortRatio: safe(stat.shortRatio?.raw),
-      beta: safe(stat.beta?.raw || detail.beta?.raw),
-      dividendYield: safe(detail.dividendYield?.raw),
+      recMean: safe(recMean),
+      recKey: "",
+      targetMeanPrice: safe(m.targetPrice),
+      analystCount: safe(total || null),
+      shortRatio: safe(m.shortInterestRatio),
+      beta: safe(m.beta),
+      dividendYield: safe(
+        m.dividendYieldIndicatedAnnual
+          ? m.dividendYieldIndicatedAnnual / 100
+          : null,
+      ),
       closes,
       timestamps,
-      _crumb: crumb ? "ok" : "none", // debug
     };
 
     return { statusCode: 200, headers, body: JSON.stringify(result) };

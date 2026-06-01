@@ -2,24 +2,17 @@ const https = require("https");
 
 function get(url) {
   return new Promise((resolve, reject) => {
-    const req = https.get(
-      url,
-      {
-        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-        timeout: 10000,
-      },
-      (res) => {
-        let data = "";
-        res.on("data", (c) => (data += c));
-        res.on("end", () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            reject(new Error("JSON parse failed"));
-          }
-        });
-      },
-    );
+    const req = https.get(url, { timeout: 12000 }, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          reject(new Error("JSON parse error"));
+        }
+      });
+    });
     req.on("error", reject);
     req.on("timeout", () => {
       req.destroy();
@@ -51,40 +44,30 @@ exports.handler = async (event) => {
     "Content-Type": "application/json",
   };
   const ticker = (event.queryStringParameters?.ticker || "").toUpperCase();
-  if (!ticker)
+  const KEY = process.env.FINNHUB_API_KEY;
+
+  if (!ticker || !KEY)
     return { statusCode: 200, headers, body: JSON.stringify({ news: [] }) };
 
   try {
-    const data = await get(
-      `https://query1.finance.yahoo.com/v2/finance/news?tickers=${ticker}&count=8`,
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - 30 * 24 * 3600; // 최근 30일
+    const items = await get(
+      `https://finnhub.io/api/v1/company-news?symbol=${ticker}&from=${new Date(from * 1000).toISOString().slice(0, 10)}&to=${new Date(to * 1000).toISOString().slice(0, 10)}&token=${KEY}`,
     );
-    const items = data?.items?.result || data?.news || [];
+
+    if (!Array.isArray(items))
+      return { statusCode: 200, headers, body: JSON.stringify({ news: [] }) };
 
     const news = await Promise.all(
       items.slice(0, 8).map(async (n) => {
-        const c = n.content || n;
-        const title = c.title || c.headline || n.title || "";
-        const link =
-          c.canonicalUrl?.url ||
-          c.clickThroughUrl?.url ||
-          c.link ||
-          n.link ||
-          "#";
-        const publisher =
-          c.provider?.displayName || c.publisher || n.publisher || "";
-        let pubAt =
-          c.pubDate || c.providerPublishTime || n.providerPublishTime || 0;
-        if (typeof pubAt === "string") {
-          pubAt = Math.floor(new Date(pubAt).getTime() / 1000) || 0;
-        }
-        if (!title) return null;
-        const titleKo = await translateKo(title);
+        const titleKo = await translateKo(n.headline || "");
         return {
           title: titleKo,
-          titleOrig: title,
-          link,
-          publisher,
-          publishedAt: pubAt,
+          titleOrig: n.headline || "",
+          link: n.url || "#",
+          publisher: n.source || "",
+          publishedAt: n.datetime || 0,
         };
       }),
     );
@@ -92,7 +75,7 @@ exports.handler = async (event) => {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ news: news.filter(Boolean) }),
+      body: JSON.stringify({ news: news.filter((n) => n.titleOrig) }),
     };
   } catch (e) {
     return {
