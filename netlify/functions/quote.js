@@ -1,24 +1,33 @@
 const https = require("https");
 
-function get(url) {
+// Generic HTTP GET — returns parsed JSON and response headers
+function get(url, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const req = https.get(
       url,
       {
         headers: {
-          "User-Agent": "Mozilla/5.0",
-          Accept: "application/json",
+          "User-Agent":
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          ...extraHeaders,
         },
-        timeout: 10000,
+        timeout: 12000,
       },
       (res) => {
         let data = "";
+        const cookies = res.headers["set-cookie"] || [];
         res.on("data", (c) => (data += c));
         res.on("end", () => {
           try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            reject(new Error("JSON parse failed: " + data.slice(0, 100)));
+            resolve({
+              json: JSON.parse(data),
+              cookies,
+              status: res.statusCode,
+            });
+          } catch {
+            resolve({ text: data, cookies, status: res.statusCode });
           }
         });
       },
@@ -29,6 +38,25 @@ function get(url) {
       reject(new Error("timeout"));
     });
   });
+}
+
+// Fetch Yahoo crumb + cookies
+async function getYahooCrumb() {
+  try {
+    // Step 1: get cookies from Yahoo Finance homepage
+    const r1 = await get("https://finance.yahoo.com/");
+    const cookieStr = (r1.cookies || []).map((c) => c.split(";")[0]).join("; ");
+
+    // Step 2: get crumb using cookies
+    const r2 = await get("https://query2.finance.yahoo.com/v1/test/getcrumb", {
+      Cookie: cookieStr,
+    });
+    const crumb = r2.text?.trim() || r2.json;
+    if (typeof crumb === "string" && crumb.length > 0 && crumb.length < 30) {
+      return { crumb, cookieStr };
+    }
+  } catch {}
+  return { crumb: null, cookieStr: "" };
 }
 
 function safe(v) {
@@ -79,21 +107,27 @@ exports.handler = async (event) => {
     };
 
   try {
-    const [chartData, summaryData] = await Promise.all([
-      get(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1y`,
-      ),
-      get(
-        `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=price,financialData,defaultKeyStatistics,summaryDetail,recommendationTrend,summaryProfile`,
-      ),
+    // Get crumb for authenticated endpoints
+    const { crumb, cookieStr } = await getYahooCrumb();
+    const authHeaders = cookieStr ? { Cookie: cookieStr } : {};
+
+    // Fetch chart + summary in parallel
+    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1y`;
+    const summaryUrl = crumb
+      ? `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=price,financialData,defaultKeyStatistics,summaryDetail,recommendationTrend,summaryProfile&crumb=${encodeURIComponent(crumb)}`
+      : `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${ticker}?modules=price,financialData,defaultKeyStatistics,summaryDetail,recommendationTrend,summaryProfile`;
+
+    const [chartRes, summaryRes] = await Promise.all([
+      get(chartUrl),
+      get(summaryUrl, authHeaders),
     ]);
 
-    const c = chartData?.chart?.result?.[0];
+    const c = chartRes.json?.chart?.result?.[0];
     if (!c)
       return {
         statusCode: 404,
         headers,
-        body: JSON.stringify({ error: "no data" }),
+        body: JSON.stringify({ error: "no data for " + ticker }),
       };
 
     const meta = c.meta;
@@ -103,7 +137,7 @@ exports.handler = async (event) => {
     const timestamps = c.timestamp || [];
     const rsi = calcRSI(closes);
 
-    const sum = summaryData?.quoteSummary?.result?.[0] || {};
+    const sum = summaryRes.json?.quoteSummary?.result?.[0] || {};
     const fin = sum.financialData || {};
     const stat = sum.defaultKeyStatistics || {};
     const detail = sum.summaryDetail || {};
@@ -112,8 +146,13 @@ exports.handler = async (event) => {
 
     const result = {
       ticker,
-      name: priceM.longName || priceM.shortName || meta.symbol || ticker,
-      exchange: meta.exchangeName || "",
+      name:
+        priceM.longName ||
+        priceM.shortName ||
+        meta.shortName ||
+        meta.symbol ||
+        ticker,
+      exchange: meta.exchangeName || priceM.exchangeName || "",
       sector: sp.sector || "",
       industry: sp.industry || "",
       currency: meta.currency || "USD",
@@ -121,7 +160,7 @@ exports.handler = async (event) => {
       prev: safe(meta.chartPreviousClose),
       high52: safe(meta.fiftyTwoWeekHigh),
       low52: safe(meta.fiftyTwoWeekLow),
-      marketCap: safe(priceM.marketCap?.raw),
+      marketCap: safe(priceM.marketCap?.raw || detail.marketCap?.raw),
       pe: safe(stat.trailingPE?.raw || detail.trailingPE?.raw),
       forwardPe: safe(stat.forwardPE?.raw),
       pb: safe(stat.priceToBook?.raw),
@@ -135,9 +174,7 @@ exports.handler = async (event) => {
       ma20: safe(avg(closes, 20)),
       ma60: safe(avg(closes, 60)),
       ma120: safe(avg(closes, 120)),
-      recMean: safe(
-        fin.recommendationMean?.raw || stat.recommendationMean?.raw,
-      ),
+      recMean: safe(fin.recommendationMean?.raw),
       recKey: fin.recommendationKey || "",
       targetMeanPrice: safe(fin.targetMeanPrice?.raw),
       analystCount: safe(fin.numberOfAnalystOpinions?.raw),
@@ -146,6 +183,7 @@ exports.handler = async (event) => {
       dividendYield: safe(detail.dividendYield?.raw),
       closes,
       timestamps,
+      _crumb: crumb ? "ok" : "none", // debug
     };
 
     return { statusCode: 200, headers, body: JSON.stringify(result) };
