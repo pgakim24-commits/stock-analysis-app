@@ -61,7 +61,7 @@ exports.handler = async (event) => {
     "Content-Type": "application/json",
   };
   const ticker = (event.queryStringParameters?.ticker || "").toUpperCase();
-  const KEY = process.env.FINNHUB_API_KEY;
+  const KEY = process.env.FINNHUB_API_KEY || process.env.finnhub_api_key;
 
   if (!ticker)
     return {

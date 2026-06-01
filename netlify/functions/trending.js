@@ -32,7 +32,7 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Origin": "*",
     "Content-Type": "application/json",
   };
-  const KEY = process.env.FINNHUB_API_KEY;
+  const KEY = process.env.FINNHUB_API_KEY || process.env.finnhub_api_key;
   if (!KEY)
     return {
       statusCode: 500,
