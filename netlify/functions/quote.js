@@ -95,7 +95,10 @@ exports.handler = async (event) => {
       return {
         statusCode: 404,
         headers,
-        body: JSON.stringify({ error: "티커를 찾을 수 없습니다: " + ticker }),
+        body: JSON.stringify({
+          error: "티커를 찾을 수 없습니다: " + ticker,
+          debug: { quote, keyLen: KEY?.length },
+        }),
       };
 
     // Candle data for chart + MA + RSI (1년치, 일봉)
